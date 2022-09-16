@@ -596,116 +596,28 @@ capture_e display_vram_t::capture(snapshot_cb_t &&snapshot_cb, std::shared_ptr<:
 capture_e display_vram_t::snapshot(platf::img_t *img_base, std::chrono::milliseconds timeout, bool cursor_visible) {
   auto img = (img_d3d_t *)img_base;
 
-  HRESULT status;
+  ID3D11Resource* texture = NULL;
+  capture_e result = dup.iddblt(device.get(), &texture);
 
-  DXGI_OUTDUPL_FRAME_INFO frame_info;
-
-  resource_t::pointer res_p {};
-  auto capture_status = dup.next_frame(frame_info, timeout, &res_p);
-  resource_t res { res_p };
-
-  if(capture_status != capture_e::ok) {
-    return capture_status;
+  if (result == capture_e::ok)
+  {
+    ID3D11Resource* targetTexture = img->texture.get();
+    device_ctx->CopyResource(targetTexture, texture);
+    targetTexture->Release();
+    texture->Release();
+    idleFramesAvailable = 10;
+  }
+  else if (result == capture_e::timeout && idleFramesAvailable > 0)
+  {
+    idleFramesAvailable--;
+    result = capture_e::ok;
+  }
+  else if (result == capture_e::reinit)
+  {
+    idleFramesAvailable = 0;
   }
 
-  const bool mouse_update_flag = frame_info.LastMouseUpdateTime.QuadPart != 0 || frame_info.PointerShapeBufferSize > 0;
-  const bool frame_update_flag = frame_info.AccumulatedFrames != 0 || frame_info.LastPresentTime.QuadPart != 0;
-  const bool update_flag       = mouse_update_flag || frame_update_flag;
-
-  if(!update_flag) {
-    return capture_e::timeout;
-  }
-
-  if(frame_info.PointerShapeBufferSize > 0) {
-    DXGI_OUTDUPL_POINTER_SHAPE_INFO shape_info {};
-
-    util::buffer_t<std::uint8_t> img_data { frame_info.PointerShapeBufferSize };
-
-    UINT dummy;
-    status = dup.dup->GetFramePointerShape(img_data.size(), std::begin(img_data), &dummy, &shape_info);
-    if(FAILED(status)) {
-      BOOST_LOG(error) << "Failed to get new pointer shape [0x"sv << util::hex(status).to_string_view() << ']';
-
-      return capture_e::error;
-    }
-
-    auto cursor_img = make_cursor_image(std::move(img_data), shape_info);
-
-    D3D11_SUBRESOURCE_DATA data {
-      std::begin(cursor_img),
-      4 * shape_info.Width,
-      0
-    };
-
-    // Create texture for cursor
-    D3D11_TEXTURE2D_DESC t {};
-    t.Width            = shape_info.Width;
-    t.Height           = cursor_img.size() / data.SysMemPitch;
-    t.MipLevels        = 1;
-    t.ArraySize        = 1;
-    t.SampleDesc.Count = 1;
-    t.Usage            = D3D11_USAGE_DEFAULT;
-    t.Format           = DXGI_FORMAT_B8G8R8A8_UNORM;
-    t.BindFlags        = D3D11_BIND_SHADER_RESOURCE;
-
-    texture2d_t texture;
-    auto status = device->CreateTexture2D(&t, &data, &texture);
-    if(FAILED(status)) {
-      BOOST_LOG(error) << "Failed to create mouse texture [0x"sv << util::hex(status).to_string_view() << ']';
-      return capture_e::error;
-    }
-
-    D3D11_SHADER_RESOURCE_VIEW_DESC desc {
-      DXGI_FORMAT_B8G8R8A8_UNORM,
-      D3D11_SRV_DIMENSION_TEXTURE2D
-    };
-    desc.Texture2D.MipLevels = 1;
-
-    // Free resources before allocating on the next line.
-    cursor.input_res.reset();
-    status = device->CreateShaderResourceView(texture.get(), &desc, &cursor.input_res);
-    if(FAILED(status)) {
-      BOOST_LOG(error) << "Failed to create cursor shader resource view [0x"sv << util::hex(status).to_string_view() << ']';
-      return capture_e::error;
-    }
-
-    cursor.set_texture(t.Width, t.Height, std::move(texture));
-  }
-
-  if(frame_info.LastMouseUpdateTime.QuadPart) {
-    cursor.set_pos(frame_info.PointerPosition.Position.x, frame_info.PointerPosition.Position.y, frame_info.PointerPosition.Visible && cursor_visible);
-  }
-
-  if(frame_update_flag) {
-    src.reset();
-    status = res->QueryInterface(IID_ID3D11Texture2D, (void **)&src);
-
-    if(FAILED(status)) {
-      BOOST_LOG(error) << "Couldn't query interface [0x"sv << util::hex(status).to_string_view() << ']';
-      return capture_e::error;
-    }
-  }
-
-  device_ctx->CopyResource(img->texture.get(), src.get());
-  if(cursor.visible) {
-    D3D11_VIEWPORT view {
-      0.0f, 0.0f,
-      (float)width, (float)height,
-      0.0f, 1.0f
-    };
-
-    device_ctx->VSSetShader(scene_vs.get(), nullptr, 0);
-    device_ctx->PSSetShader(scene_ps.get(), nullptr, 0);
-    device_ctx->RSSetViewports(1, &view);
-    device_ctx->OMSetRenderTargets(1, &img->scene_rt, nullptr);
-    device_ctx->PSSetShaderResources(0, 1, &cursor.input_res);
-    device_ctx->OMSetBlendState(blend_enable.get(), nullptr, 0xFFFFFFFFu);
-    device_ctx->RSSetViewports(1, &cursor.cursor_view);
-    device_ctx->Draw(3, 0);
-    device_ctx->OMSetBlendState(blend_disable.get(), nullptr, 0xFFFFFFFFu);
-  }
-
-  return capture_e::ok;
+  return result;
 }
 
 int display_vram_t::init(int framerate, const std::string &display_name) {

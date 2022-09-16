@@ -4,6 +4,9 @@
 
 #include <cmath>
 #include <codecvt>
+#include <windows.h>
+#include <shtypes.h>
+#include <shellscalingapi.h>
 
 #include "display.h"
 #include "misc.h"
@@ -15,67 +18,108 @@ namespace platf {
 using namespace std::literals;
 }
 namespace platf::dxgi {
-capture_e duplication_t::next_frame(DXGI_OUTDUPL_FRAME_INFO &frame_info, std::chrono::milliseconds timeout, resource_t::pointer *res_p) {
-  auto capture_status = release_frame();
-  if(capture_status != capture_e::ok) {
-    return capture_status;
+float GetPrimaryMonitorScale(PRECT desktopRectangle)
+{
+  float scale = 1.0f;
+  const POINT ptZero = { 0, 0 };
+  HMONITOR monitor = MonitorFromPoint(ptZero, MONITOR_DEFAULTTOPRIMARY);
+  if (monitor != NULL)
+  {
+    MONITORINFOEX monitorInfo = {0};
+    monitorInfo.cbSize = sizeof(monitorInfo);
+    if (GetMonitorInfoA(monitor, (LPMONITORINFO)&monitorInfo))
+    {
+      DEVMODE deviceInfo = {0};
+      deviceInfo.dmSize = sizeof(deviceInfo);
+      if (EnumDisplaySettingsA(monitorInfo.szDevice, ENUM_CURRENT_SETTINGS, &deviceInfo))
+      {
+        scale = (float)deviceInfo.dmPelsWidth / (float)(desktopRectangle->right - desktopRectangle->left);
+        float value = (int)(scale * 100 + .5);
+        scale = (float)value / 100;
+      }
+    }
   }
-
-  if(use_dwmflush) {
-    DwmFlush();
-  }
-
-  auto status = dup->AcquireNextFrame(timeout.count(), &frame_info, res_p);
-
-  switch(status) {
-  case S_OK:
-    has_frame = true;
-    return capture_e::ok;
-  case DXGI_ERROR_WAIT_TIMEOUT:
-    return capture_e::timeout;
-  case WAIT_ABANDONED:
-  case DXGI_ERROR_ACCESS_LOST:
-  case DXGI_ERROR_ACCESS_DENIED:
-    return capture_e::reinit;
-  default:
-    BOOST_LOG(error) << "Couldn't acquire next frame [0x"sv << util::hex(status).to_string_view();
-    return capture_e::error;
-  }
+  return scale;
 }
 
-capture_e duplication_t::reset(dup_t::pointer dup_p) {
-  auto capture_status = release_frame();
+capture_e duplication_t::iddblt(ID3D11Device* baseDevice, ID3D11Resource** texture) {
+  // We haven't opened the shared framebuffer handle yet
+  if (iddFrameBufferHandle == NULL) {
+    // Open the shared frame buffer handle
+    iddFrameBufferHandle = OpenFileMappingA(FILE_MAP_ALL_ACCESS, FALSE, "Global\\IddSampleDriverFrameBuffer");
 
-  dup.reset(dup_p);
+    // We managed to open the shared frame buffer handle
+    if (iddFrameBufferHandle != NULL)
+    {
+      // Map the shared frame buffer header
+      iddFrameBufferHeader = (PSharedFrameBufferHeader)MapViewOfFile(iddFrameBufferHandle, FILE_MAP_ALL_ACCESS, 0, 0, sizeof(SharedFrameBufferHeader));
 
-  return capture_status;
-}
+      // We managed to map the shared frame buffer header
+      if (iddFrameBufferHeader != NULL)
+      {
+        // Figure out how big the shared frame buffer really is
+        SIZE_T mappedBufferLength = iddFrameBufferHeader->MappedBufferLength;
 
-capture_e duplication_t::release_frame() {
-  if(!has_frame) {
-    return capture_e::ok;
+        // Unmap the shared frame buffer header
+        UnmapViewOfFile(iddFrameBufferHeader);
+
+        // Map the whole shared frame buffer
+        iddFrameBufferHeader = (PSharedFrameBufferHeader)MapViewOfFile(iddFrameBufferHandle, FILE_MAP_ALL_ACCESS, 0, 0, mappedBufferLength);
+
+        // We managed to map the shared frame buffer
+        if (iddFrameBufferHeader != NULL)
+        {
+          // Calculate the front & back frame buffer address
+          iddFrameBuffer[0] = (LPVOID)(&iddFrameBufferHeader[1]);
+          iddFrameBuffer[1] = (LPVOID)(((PUCHAR)iddFrameBuffer[0]) + ((iddFrameBufferHeader->MappedBufferLength - sizeof(SharedFrameBufferHeader) - (64 * 1024)) / 2));
+
+          // We're ready for IDD mirroring
+          iddMirrorEnabled = true;
+        }
+      }
+    }
   }
 
-  auto status = dup->ReleaseFrame();
-  switch(status) {
-  case S_OK:
-    has_frame = false;
-    return capture_e::ok;
-  case DXGI_ERROR_WAIT_TIMEOUT:
-    return capture_e::timeout;
-  case WAIT_ABANDONED:
-  case DXGI_ERROR_ACCESS_LOST:
-  case DXGI_ERROR_ACCESS_DENIED:
-    has_frame = false;
-    return capture_e::reinit;
-  default:
-    BOOST_LOG(error) << "Couldn't release frame [0x"sv << util::hex(status).to_string_view();
+  // IDD mirroring isn't possible without our IDD driver
+  if (!iddMirrorEnabled) {
     return capture_e::error;
   }
+
+  // Get the frame buffer index
+  UINT8 frameBufferIndex = iddFrameBufferHeader->FrameBufferIndex;
+
+  // Get the frame buffer length
+  SIZE_T frameBufferLength = iddFrameBufferHeader->FrameBufferLength[frameBufferIndex];
+
+  // There's a frame waiting for us
+  if (frameBufferLength > 0)
+  {
+    // Switch the framebuffer so the driver can keep capturing
+    iddFrameBufferHeader->FrameBufferIndex = frameBufferIndex == 0 ? 1 : 0;
+
+    // Null the length (so we don't think we've got a frame waiting on next iteration when we don't)
+    iddFrameBufferHeader->FrameBufferLength[iddFrameBufferHeader->FrameBufferIndex] = 0;
+
+    // Create a new framebuffer texture
+    if (SUCCEEDED(DirectX::CreateDDSTextureFromMemory(baseDevice, (const uint8_t*)iddFrameBuffer[frameBufferIndex], frameBufferLength, texture, nullptr)))
+    {
+      // Check whether the resolution changed
+      ID3D11Texture2D* txt = reinterpret_cast<ID3D11Texture2D*>(*texture);
+      D3D11_TEXTURE2D_DESC desc;
+      txt->GetDesc(&desc);
+      bool reinitRequired = iddFrameBufferDescription.Width != 0 && (iddFrameBufferDescription.Width != desc.Width || iddFrameBufferDescription.Height != desc.Height);
+      iddFrameBufferDescription = desc;
+
+      // Report the capture result
+      return reinitRequired ? capture_e::reinit : capture_e::ok;
+    }
+  }
+
+  // We're still waiting on a new frame
+  return capture_e::timeout;
 }
 
 duplication_t::~duplication_t() {
-  release_frame();
 }
 
 int display_base_t::init(int framerate, const std::string &display_name) {
@@ -145,8 +189,9 @@ int display_base_t::init(int framerate, const std::string &display_name) {
 
         offset_x = desc.DesktopCoordinates.left;
         offset_y = desc.DesktopCoordinates.top;
-        width    = desc.DesktopCoordinates.right - offset_x;
-        height   = desc.DesktopCoordinates.bottom - offset_y;
+        float scale = GetPrimaryMonitorScale(&desc.DesktopCoordinates);
+        width    = (desc.DesktopCoordinates.right - offset_x) * scale;
+        height   = (desc.DesktopCoordinates.bottom - offset_y) * scale;
 
         // left and bottom may be negative, yet absolute mouse coordinates start at 0x0
         // Ensure offset starts at 0x0
@@ -231,8 +276,6 @@ int display_base_t::init(int framerate, const std::string &display_name) {
     refresh_rate = std::round((double)timing_info.rateRefresh.uiNumerator / (double)timing_info.rateRefresh.uiDenominator);
   }
 
-  dup.use_dwmflush = config::video.dwmflush && !(framerate > refresh_rate) ? true : false;
-
   // Bump up thread priority
   {
     const DWORD flags = TOKEN_ADJUST_PRIVILEGES | TOKEN_QUERY;
@@ -290,37 +333,9 @@ int display_base_t::init(int framerate, const std::string &display_name) {
     }
   }
 
-  //FIXME: Duplicate output on RX580 in combination with DOOM (2016) --> BSOD
-  //TODO: Use IDXGIOutput5 for improved performance
-  {
-    dxgi::output1_t output1 {};
-    status = output->QueryInterface(IID_IDXGIOutput1, (void **)&output1);
-    if(FAILED(status)) {
-      BOOST_LOG(error) << "Failed to query IDXGIOutput1 from the output"sv;
-      return -1;
-    }
+  format = DXGI_FORMAT_B8G8R8A8_UNORM;
 
-    // We try this twice, in case we still get an error on reinitialization
-    for(int x = 0; x < 2; ++x) {
-      status = output1->DuplicateOutput((IUnknown *)device.get(), &dup.dup);
-      if(SUCCEEDED(status)) {
-        break;
-      }
-      std::this_thread::sleep_for(200ms);
-    }
-
-    if(FAILED(status)) {
-      BOOST_LOG(error) << "DuplicateOutput Failed [0x"sv << util::hex(status).to_string_view() << ']';
-      return -1;
-    }
-  }
-
-  DXGI_OUTDUPL_DESC dup_desc;
-  dup.dup->GetDesc(&dup_desc);
-
-  format = dup_desc.ModeDesc.Format;
-
-  BOOST_LOG(debug) << "Source format ["sv << format_str[dup_desc.ModeDesc.Format] << ']';
+  BOOST_LOG(debug) << "Source format ["sv << format_str[format] << ']';
 
   return 0;
 }

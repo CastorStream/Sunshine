@@ -198,83 +198,30 @@ capture_e display_ram_t::capture(snapshot_cb_t &&snapshot_cb, std::shared_ptr<::
 capture_e display_ram_t::snapshot(::platf::img_t *img_base, std::chrono::milliseconds timeout, bool cursor_visible) {
   auto img = (img_t *)img_base;
 
-  HRESULT status;
+  ID3D11Resource* iddtexture = NULL;
+  capture_e result = dup.iddblt(device.get(), &iddtexture);
 
-  DXGI_OUTDUPL_FRAME_INFO frame_info;
-
-  resource_t::pointer res_p {};
-  auto capture_status = dup.next_frame(frame_info, timeout, &res_p);
-  resource_t res { res_p };
-
-  if(capture_status != capture_e::ok) {
-    return capture_status;
-  }
-
-  if(frame_info.PointerShapeBufferSize > 0) {
-    auto &img_data = cursor.img_data;
-
-    img_data.resize(frame_info.PointerShapeBufferSize);
-
-    UINT dummy;
-    status = dup.dup->GetFramePointerShape(img_data.size(), img_data.data(), &dummy, &cursor.shape_info);
-    if(FAILED(status)) {
-      BOOST_LOG(error) << "Failed to get new pointer shape [0x"sv << util::hex(status).to_string_view() << ']';
-
-      return capture_e::error;
-    }
-  }
-
-  if(frame_info.LastMouseUpdateTime.QuadPart) {
-    cursor.x       = frame_info.PointerPosition.Position.x;
-    cursor.y       = frame_info.PointerPosition.Position.y;
-    cursor.visible = frame_info.PointerPosition.Visible;
-  }
-
-  // If frame has been updated
-  if(frame_info.LastPresentTime.QuadPart != 0) {
-    {
-      texture2d_t src {};
-      status = res->QueryInterface(IID_ID3D11Texture2D, (void **)&src);
-
-      if(FAILED(status)) {
-        BOOST_LOG(error) << "Couldn't query interface [0x"sv << util::hex(status).to_string_view() << ']';
-        return capture_e::error;
-      }
-
-      //Copy from GPU to CPU
-      device_ctx->CopyResource(texture.get(), src.get());
-    }
-
+  if (result == capture_e::ok)
+  {
+    ID3D11Resource* targetTexture = texture.get();
+    device_ctx->CopyResource(targetTexture, iddtexture);
     if(img_info.pData) {
       device_ctx->Unmap(texture.get(), 0);
       img_info.pData = nullptr;
     }
 
-    status = device_ctx->Map(texture.get(), 0, D3D11_MAP_READ, 0, &img_info);
+    HRESULT status = device_ctx->Map(texture.get(), 0, D3D11_MAP_READ, 0, &img_info);
     if(FAILED(status)) {
       BOOST_LOG(error) << "Failed to map texture [0x"sv << util::hex(status).to_string_view() << ']';
-
       return capture_e::error;
     }
+
+    std::copy_n((std::uint8_t *)img_info.pData, height * img_info.RowPitch, (std::uint8_t *)img->data);
+
+    iddtexture->Release();
   }
 
-  const bool mouse_update =
-    (frame_info.LastMouseUpdateTime.QuadPart || frame_info.PointerShapeBufferSize > 0) &&
-    (cursor_visible && cursor.visible);
-
-  const bool update_flag = frame_info.LastPresentTime.QuadPart != 0 || mouse_update;
-
-  if(!update_flag) {
-    return capture_e::timeout;
-  }
-
-  std::copy_n((std::uint8_t *)img_info.pData, height * img_info.RowPitch, (std::uint8_t *)img->data);
-
-  if(cursor_visible && cursor.visible) {
-    blend_cursor(cursor, *img);
-  }
-
-  return capture_e::ok;
+  return result;
 }
 
 std::shared_ptr<platf::img_t> display_ram_t::alloc_img() {

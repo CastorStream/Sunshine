@@ -112,6 +112,8 @@ if(WIN32)
 		src/platform/windows/display_vram.cpp
 		src/platform/windows/display_ram.cpp
 		src/platform/windows/audio.cpp
+		src/platform/windows/DDSTextureLoader11.h
+		src/platform/windows/DDSTextureLoader11.cpp
 		third-party/ViGEmClient/src/ViGEmClient.cpp
 		third-party/ViGEmClient/include/ViGEm/Client.h
 		third-party/ViGEmClient/include/ViGEm/Common.h

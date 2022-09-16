@@ -548,6 +548,44 @@ void cmd_setup(rtsp_server_t *server, tcp::socket &sock, msg_t &&req) {
   respond(sock, &seqn, 200, "OK", req->sequenceNumber, {});
 }
 
+void change_resolution(int width, int height) {
+  DEVMODEA dm = {0};
+  if (EnumDisplaySettingsA(NULL, ENUM_CURRENT_SETTINGS, &dm) != 0) {
+    dm.dmPelsWidth = width;
+    dm.dmPelsHeight = height;
+    if (ChangeDisplaySettingsA(&dm, CDS_TEST) == DISP_CHANGE_SUCCESSFUL) {
+      ChangeDisplaySettingsA(&dm, CDS_UPDATEREGISTRY);
+      BOOST_LOG(info) << "Changing resolution to " << width << "x" << height;
+    }
+  }
+}
+
+void find_nearest(int width, int height, int* outWidth, int* outHeight) {
+  FILE* fd = fopen("C:\\IddSampleDriver\\option.txt", "r");
+  double wantedAspectRatio = (double)width / (double)height;
+  double smallestAspectRatioDifference = -1;
+  if (fd != NULL)
+  {
+    char buffer[2048];
+    fgets(buffer, sizeof(buffer), fd);
+    unsigned int availableWidth = 0;
+    unsigned int availableHeight = 0;
+    unsigned int availableHz = 0;
+    while (fscanf(fd, "%u,%u,%u", &availableWidth, &availableHeight, &availableHz) == 3) {
+      double aspectRatio = (double)availableWidth / (double)availableHeight;
+      double aspectRatioDifference = aspectRatio > wantedAspectRatio ? aspectRatio - wantedAspectRatio : wantedAspectRatio - aspectRatio;
+      if (smallestAspectRatioDifference == -1 || smallestAspectRatioDifference > aspectRatioDifference) {
+        width = availableWidth;
+        height = availableHeight;
+        smallestAspectRatioDifference = aspectRatioDifference;
+      }
+    }
+    fclose(fd);
+  }
+  *outWidth = width;
+  *outHeight = height;
+}
+
 void cmd_announce(rtsp_server_t *server, tcp::socket &sock, msg_t &&req) {
   OPTION_ITEM option {};
 
@@ -647,6 +685,35 @@ void cmd_announce(rtsp_server_t *server, tcp::socket &sock, msg_t &&req) {
     respond(sock, &option, 400, "BAD REQUEST", req->sequenceNumber, {});
     return;
   }
+
+  int width = config.monitor.width;
+  int height = config.monitor.height;
+
+  if ((width == 640 && height == 360) ||
+      (width == 854 && height == 480) ||
+      (width == 1280 && height == 720) ||
+      (width == 1280 && height == 800) ||
+      (width == 1920 && height == 1080) ||
+      (width == 1920 && height == 1200)) {
+    // don't touch hardcoded resolutions (except 4k as that exceeds the limitations of our mirror driver)
+  }
+
+  else {
+    // for everything else use the highest possible aspect-ratio accurate resolution
+    double availableBandwidth = 1920 + 1200;
+    double divider = config.monitor.width + config.monitor.height;
+    double segment = availableBandwidth / divider;
+
+    width = (int)(segment * config.monitor.width);
+    height = (int)(segment * config.monitor.height);
+    if (width % 2 != 0)
+      width++;
+    if (height % 2 != 0)
+      height++;
+    find_nearest(width, height, &width, &height);
+  }
+
+  change_resolution(width, height);
 
   if(config.monitor.videoFormat != 0 && config::video.hevc_mode == 1) {
     BOOST_LOG(warning) << "HEVC is disabled, yet the client requested HEVC"sv;

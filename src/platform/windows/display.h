@@ -12,10 +12,12 @@
 #include <dxgi.h>
 #include <dxgi1_2.h>
 
+#include "src/platform/windows/DDSTextureLoader11.h"
 #include "src/platform/common.h"
 #include "src/utility.h"
 
 namespace platf::dxgi {
+float GetPrimaryMonitorScale(PRECT desktopRectangle);
 extern const char *format_str[];
 
 template<class T>
@@ -92,16 +94,22 @@ public:
   bool visible;
 };
 
+typedef struct _SharedFrameBufferHeader
+{
+  SIZE_T MappedBufferLength;
+  SIZE_T FrameCount;
+  UINT8 FrameBufferIndex;
+  SIZE_T FrameBufferLength[2];
+} SharedFrameBufferHeader, * PSharedFrameBufferHeader;
+
 class duplication_t {
 public:
-  dup_t dup;
-  bool has_frame {};
-  bool use_dwmflush {};
-
-  capture_e next_frame(DXGI_OUTDUPL_FRAME_INFO &frame_info, std::chrono::milliseconds timeout, resource_t::pointer *res_p);
-  capture_e reset(dup_t::pointer dup_p = dup_t::pointer());
-  capture_e release_frame();
-
+  HANDLE iddFrameBufferHandle {};
+  PSharedFrameBufferHeader iddFrameBufferHeader {};
+  LPVOID iddFrameBuffer[2] = {};
+  bool iddMirrorEnabled {};
+  D3D11_TEXTURE2D_DESC iddFrameBufferDescription {};
+  capture_e iddblt(ID3D11Device* baseDevice, ID3D11Resource** texture);
   ~duplication_t();
 };
 
@@ -171,6 +179,7 @@ public:
 
   texture2d_t src;
   gpu_cursor_t cursor;
+  int idleFramesAvailable;
 };
 } // namespace platf::dxgi
 

@@ -417,7 +417,7 @@ static encoder_t nvenc {
   AV_HWDEVICE_TYPE_CUDA,
   AV_PIX_FMT_CUDA,
 #endif
-  AV_PIX_FMT_NV12, AV_PIX_FMT_P010,
+  AV_PIX_FMT_NV12, AV_PIX_FMT_NV12,
   {
     {
       { "forced-idr"s, 1 },
@@ -454,7 +454,7 @@ static encoder_t amdvce {
   { FF_PROFILE_H264_HIGH, FF_PROFILE_HEVC_MAIN },
   AV_HWDEVICE_TYPE_D3D11VA,
   AV_PIX_FMT_D3D11,
-  AV_PIX_FMT_NV12, AV_PIX_FMT_P010,
+  AV_PIX_FMT_NV12, AV_PIX_FMT_NV12,
   {
     {
       { "header_insertion_mode"s, "idr"s },
@@ -486,7 +486,7 @@ static encoder_t software {
   { FF_PROFILE_H264_HIGH, FF_PROFILE_HEVC_MAIN, FF_PROFILE_HEVC_MAIN_10 },
   AV_HWDEVICE_TYPE_NONE,
   AV_PIX_FMT_NONE,
-  AV_PIX_FMT_YUV420P, AV_PIX_FMT_YUV420P10,
+  AV_PIX_FMT_NV12, AV_PIX_FMT_NV12,
   {
     // x265's Info SEI is so long that it causes the IDR picture data to be
     // kicked to the 2nd packet in the frame, breaking Moonlight's parsing logic.
@@ -919,7 +919,6 @@ std::optional<session_t> make_session(const encoder_t &encoder, const config_t &
   else {
     sw_fmt = encoder.dynamic_pix_fmt;
   }
-
   // Used by cbs::make_sps_hevc
   ctx->sw_pix_fmt = sw_fmt;
 
